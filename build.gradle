@@ -2,41 +2,47 @@ plugins {
     id 'java'
 }
 
-group = 'de.mark225'
-version = '1.0'
+group = 'com.multitec'
+version = '2.0.0'
 
 repositories {
     mavenCentral()
+    maven { url = 'https://repo.papermc.io/repository/maven-public/' }
     maven {
-        name = "spigotmc-repo"
-        url = "https://hub.spigotmc.org/nexus/content/repositories/snapshots/"
+        url = 'https://repo.bluecolored.de/releases'
+        metadataSources {
+            mavenPom()
+            artifact()
+        }
     }
-    maven {
-        name = "sonatype"
-        url = "https://oss.sonatype.org/content/groups/public/"
-    }
-    maven { url 'https://jitpack.io' }
 }
 
 dependencies {
-    compileOnly "org.spigotmc:spigot-api:1.13-R0.1-SNAPSHOT"
-    compileOnly 'com.github.BlueMap-Minecraft:BlueMapAPI:v2.4.0'
+    // Pinned to the exact Paper build the server runs (PAPER_BUILD in MT-Minecraft's
+    // compose). The server is pinned, so the plugin is compiled against the same API.
+    compileOnly 'io.papermc.paper:paper-api:26.2.build.115-stable'
+    // The API version BlueMap 5.23 serves; 2.7.x is what the chunk-trimmer addon already
+    // runs against on this server.
+    compileOnly 'de.bluecolored:bluemap-api:2.7.7'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.3'
+    // Only to check that what the exporter writes is valid JSON a browser can parse.
+    testImplementation 'com.google.code.gson:gson:2.11.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
-def targetJavaVersion = 17
 java {
-    def javaVersion = JavaVersion.toVersion(targetJavaVersion)
-    sourceCompatibility = javaVersion
-    targetCompatibility = javaVersion
-    if (JavaVersion.current() < javaVersion) {
-        toolchain.languageVersion = JavaLanguageVersion.of(targetJavaVersion)
-    }
+    toolchain.languageVersion = JavaLanguageVersion.of(25)
 }
 
 tasks.withType(JavaCompile).configureEach {
-    if (targetJavaVersion >= 10 || JavaVersion.current().isJava10Compatible()) {
-        options.release = targetJavaVersion
-    }
+    options.release = 25
+    options.encoding = 'UTF-8'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging { events 'failed'; exceptionFormat 'full' }
 }
 
 processResources {

@@ -1,13 +1,20 @@
-name: BMTrails
+name: HeroPath
 version: '${version}'
-main: de.mark225.bmtrails.BMTrails
-api-version: '1.20'
-prefix: BMTrails
+main: com.multitec.heropath.HeroPath
+api-version: '1.21'
 depend: [BlueMap]
-authors: [Mark_225]
-description: A simple BlueMap addon that displays player trails on the map
+authors: [Mark_225, Multitec]
+description: Where every player went, on the BlueMap web map. A fork of BMTrails.
+website: https://github.com/Multitec-UA/HeroPath
+commands:
+  heropath:
+    description: HeroPath status, or export the web history now
+    usage: /heropath [status|export]
+    permission: heropath.admin
 permissions:
-  bmtrails.visible:
-    default: false
-  bmtrails.customcolor:
+  heropath.admin:
+    description: Run /heropath
+    default: op
+  heropath.untracked:
+    description: This player's movement is not recorded or shown
     default: false
