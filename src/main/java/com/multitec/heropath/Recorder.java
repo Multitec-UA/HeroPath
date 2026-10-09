@@ -31,6 +31,10 @@ public final class Recorder {
      * it was not walked, or null when nothing needs writing.
      */
     public Sample offer(Sample s) {
+        if (s.kind() == Sample.Kind.ADVANCEMENT) {
+            // Written, but it is not a place the player moved to: keep the reference point.
+            return s;
+        }
         if (s.kind() != Sample.Kind.POINT) {
             // Events are always written, and they reset the reference point.
             last = s;

@@ -8,6 +8,9 @@ import de.bluecolored.bluemap.api.markers.LineMarker;
 import de.bluecolored.bluemap.api.markers.MarkerSet;
 import de.bluecolored.bluemap.api.math.Color;
 import de.bluecolored.bluemap.api.math.Line;
+import io.papermc.paper.advancement.AdvancementDisplay;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -18,6 +21,8 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.PlayerAdvancementDoneEvent;
+import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
@@ -246,7 +251,11 @@ public final class HeroPath extends JavaPlugin implements Listener {
     }
 
     private Sample event(Player p, Sample.Kind kind, Location l, long now) {
-        return new Sample(now, kind, l.getWorld().getName(), l.getX(), l.getY(), l.getZ());
+        return event(p, kind, l, now, null);
+    }
+
+    private Sample event(Player p, Sample.Kind kind, Location l, long now, String detail) {
+        return new Sample(now, kind, l.getWorld().getName(), l.getX(), l.getY(), l.getZ(), detail);
     }
 
     // ---------------------------------------------------------------- events (server thread)
@@ -286,8 +295,44 @@ public final class HeroPath extends JavaPlugin implements Listener {
         Player p = e.getEntity();
         if (!tracked(p, blueMap)) return;
         UUID uuid = p.getUniqueId();
-        Sample s = event(p, Sample.Kind.DEATH, p.getLocation(), System.currentTimeMillis());
+        // The death message is the cause, as the game says it: "ana was slain by Zombie".
+        Component msg = e.deathMessage();
+        String cause = msg == null ? null : PlainTextComponentSerializer.plainText().serialize(msg);
+        Sample s = event(p, Sample.Kind.DEATH, p.getLocation(), System.currentTimeMillis(), cause);
         io.execute(() -> record(uuid, s, false));
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onAdvancement(PlayerAdvancementDoneEvent e) {
+        Player p = e.getPlayer();
+        if (!tracked(p, blueMap)) return;
+        // Recipes are advancements too, hundreds of them, with no display: skip those. What
+        // is left is what the game itself shows as a toast.
+        AdvancementDisplay display = e.getAdvancement().getDisplay();
+        if (display == null) return;
+        String title = PlainTextComponentSerializer.plainText().serialize(display.title());
+        String frame = display.frame().name().toLowerCase(Locale.ROOT);
+        UUID uuid = p.getUniqueId();
+        Sample s = event(p, Sample.Kind.ADVANCEMENT, p.getLocation(), System.currentTimeMillis(), frame + "|" + title);
+        io.execute(() -> record(uuid, s, false));
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onChangedWorld(PlayerChangedWorldEvent e) {
+        Player p = e.getPlayer();
+        if (!tracked(p, blueMap)) return;
+        UUID uuid = p.getUniqueId();
+        String from = switch (e.getFrom().getEnvironment()) {
+            case NETHER -> "nether";
+            case THE_END -> "end";
+            default -> "overworld";
+        };
+        Sample s = event(p, Sample.Kind.DIMENSION, p.getLocation(), System.currentTimeMillis(), from);
+        io.execute(() -> {
+            recorders.remove(uuid);
+            live.remove(uuid);
+            record(uuid, s, false);
+        });
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)

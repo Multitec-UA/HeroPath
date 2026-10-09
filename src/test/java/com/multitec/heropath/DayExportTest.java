@@ -118,4 +118,23 @@ class DayExportTest {
         assertEquals(24 * 3600, DayExport.secs(lateEvening, midnight),
                 "23:00 is 24 h after midnight on a 25-hour day; the slider shows elapsed time");
     }
+
+    @Test
+    void eventsCarryTheirDetailAndTheDayItsMidnight() {
+        Map<UUID, List<Sample>> in = Map.of(ANA, List.of(
+                s(100, JOIN, "world", 0, 0),
+                new Sample(MIDNIGHT + 110_000, ADVANCEMENT, "world", 1, 64, 0, "goal|Acquire Hardware"),
+                new Sample(MIDNIGHT + 120_000, DEATH, "world", 2, 64, 0, "ana \"fell\""),
+                new Sample(MIDNIGHT + 130_000, DIMENSION, "world_nether", 5, 64, 5, "overworld")));
+        DayExport.Result r = build(in);
+        JsonObject doc = JsonParser.parseString(r.jsonByMap().get("world")).getAsJsonObject();
+        assertEquals(MIDNIGHT / 1000, doc.get("t0").getAsLong());
+        JsonArray ev = doc.getAsJsonArray("players").get(0).getAsJsonObject().getAsJsonArray("events");
+        assertTrue(ev.get(0).getAsJsonArray().get(5).isJsonNull(), "a join has no detail");
+        assertEquals("goal|Acquire Hardware", ev.get(1).getAsJsonArray().get(5).getAsString());
+        assertEquals("ana \"fell\"", ev.get(2).getAsJsonArray().get(5).getAsString(), "quotes survive");
+        JsonObject nether = JsonParser.parseString(r.jsonByMap().get("world_nether")).getAsJsonObject();
+        JsonArray nev = nether.getAsJsonArray("players").get(0).getAsJsonObject().getAsJsonArray("events");
+        assertEquals("W", nev.get(0).getAsJsonArray().get(1).getAsString(), "the arrival is drawn in the nether");
+    }
 }

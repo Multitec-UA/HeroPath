@@ -1,19 +1,24 @@
 /*
  * HeroPath: the web-map half.
  *
- * Adds a footprints button to BlueMap's control bar. It opens a panel where you pick a day
- * and the players, then drag (or play) a time slider: each player's route is drawn up to
- * that moment, with a dot where they were and a cross where they died, like the Hero's
- * Path in Zelda: Breath of the Wild.
+ * Adds a footprints button to BlueMap's control bar. It opens a panel where you pick a range
+ * (one day, the last 7 days, the last 30 days) and the players. By default every route is
+ * drawn complete, older parts fainter, like the Hero's Path in Zelda: Breath of the Wild.
+ * The time bar replays them: it skips the hours when nobody was playing, so a week of short
+ * sessions plays as one continuous story.
+ *
+ * On the routes: a dot where each player is at that moment, a cross where they died (with
+ * the game's own death message), a star for each advancement, a ring where they arrived from
+ * another dimension. The panel lists those "moments"; clicking one jumps there.
  *
  * Data comes from files the plugin writes next to this script:
  *   assets/heropath/index.json               days and who played
- *   assets/heropath/days/<date>/<map>.json   one day of one map
+ *   assets/heropath/days/<date>/<map>.json   one day of one map (times relative to t0)
  *
- * Drawing uses BlueMap's own LineMarker and HtmlMarker, so lines look like every other
- * line on the map. They live in a THREE.Group of our own inside the marker scene: BlueMap
- * reconciles its MarkerSets against markers.json, and anything put in one would be wiped
- * on the next refresh.
+ * Drawing uses BlueMap's own LineMarker and HtmlMarker, so lines look like every other line
+ * on the map. They live in a THREE.Group of our own inside the marker scene: BlueMap
+ * reconciles its MarkerSets against markers.json, and anything put in one would be wiped on
+ * the next refresh.
  */
 (function () {
     "use strict";
@@ -23,60 +28,147 @@
     if (!app || !BM) return;
     const THREE = BM.Three;
     const BASE = "assets/heropath/";
+    // Sessions closer than this are one stretch on the time bar; a longer pause is skipped.
+    const GAP_MERGE = 300;
+    const SPEEDS = [1, 5, 10, 30, 60, 300, 1200];
 
-    const ES = (navigator.language || "").toLowerCase().startsWith("es");
+    const LANG = (navigator.language || "en").toLowerCase();
+    const ES = LANG.startsWith("es");
     const T = ES ? {
-        title: "Ruta del héroe",
-        day: "Día",
-        players: "Jugadores",
-        all: "Todos",
-        none: "Ninguno",
-        play: "Reproducir",
-        pause: "Pausa",
-        speed: "Velocidad",
-        deaths: "Mostrar muertes",
-        follow: "Seguir al jugador",
-        noData: "Todavía no hay rutas guardadas.",
-        noMap: "Nadie jugó en este mapa ese día.",
-        loading: "Cargando…",
-        died: "murió aquí",
-        updated: "Actualizado",
+        title: "Ruta del héroe", range: "Periodo", day: "Un día", week: "7 días", month: "30 días",
+        players: "Jugadores", all: "Todos", none: "Ninguno", play: "Reproducir", pause: "Pausa",
+        start: "Al principio", end: "Ruta completa", speed: "Velocidad",
+        speedHint: "Segundos de juego por cada segundo real",
+        deaths: "Muertes", advs: "Logros", dims: "Portales", follow: "Seguir al jugador",
+        show: "Mostrar", moments: "Momentos", noMoments: "Sin muertes, logros ni portales en este periodo.",
+        noData: "Todavía no hay rutas guardadas.", noMap: "Nadie jugó en este mapa en este periodo.",
+        loading: "Cargando…", focus: "Ver solo a este jugador", unfocus: "Ver a todos",
+        played: "jugado", walked: "recorrido", died: "murió", from: "llegó desde",
+        overworld: "el mundo normal", nether: "el Nether", end_dim: "el End",
+        task: "Logro", goal: "Objetivo", challenge: "Desafío", collapse: "Plegar", expand: "Desplegar",
+        close: "Cerrar", offline: "desconectado",
     } : {
-        title: "Hero Path",
-        day: "Day",
-        players: "Players",
-        all: "All",
-        none: "None",
-        play: "Play",
-        pause: "Pause",
-        speed: "Speed",
-        deaths: "Show deaths",
-        follow: "Follow player",
-        noData: "No routes recorded yet.",
-        noMap: "Nobody played on this map that day.",
-        loading: "Loading…",
-        died: "died here",
-        updated: "Updated",
+        title: "Hero Path", range: "Period", day: "One day", week: "7 days", month: "30 days",
+        players: "Players", all: "All", none: "None", play: "Play", pause: "Pause",
+        start: "To the start", end: "Full route", speed: "Speed",
+        speedHint: "Game seconds per real second",
+        deaths: "Deaths", advs: "Advancements", dims: "Portals", follow: "Follow player",
+        show: "Show", moments: "Moments", noMoments: "No deaths, advancements or portals in this period.",
+        noData: "No routes recorded yet.", noMap: "Nobody played on this map in this period.",
+        loading: "Loading…", focus: "Show only this player", unfocus: "Show everyone",
+        played: "played", walked: "walked", died: "died", from: "arrived from",
+        overworld: "the Overworld", nether: "the Nether", end_dim: "the End",
+        task: "Advancement", goal: "Goal", challenge: "Challenge", collapse: "Collapse", expand: "Expand",
+        close: "Close", offline: "offline",
     };
 
+    // ── preferences (per viewer, optional) ───────────────────
+    function pref(key, fallback) {
+        try { const v = localStorage.getItem("heropath." + key); return v === null ? fallback : JSON.parse(v); }
+        catch (e) { return fallback; }
+    }
+    function savePref(key, value) {
+        try { localStorage.setItem("heropath." + key, JSON.stringify(value)); } catch (e) { /* private mode */ }
+    }
+
     // ── state ────────────────────────────────────────────────
-    let index = null;          // index.json
-    let day = null;            // "2026-10-03"
+    let index = null;                    // index.json
+    let range = pref("range", "week");   // "day" | "week" | "month"
+    let day = null;                      // the date when range == "day"
     let mapId = null;
-    let doc = null;            // the loaded day/map document
-    let selected = new Set();  // uuids
-    let t = 0;                 // seconds since midnight shown on the slider
-    let tMin = 0, tMax = 0;
+    let players = [];                    // merged over the range, see loadRange()
+    let selected = new Set();
+    let focus = null;                    // uuid shown alone, or null
+    let intervals = [];                  // [[realStart, realEnd, virtualStart]]
+    let vMax = 0, v = 0;                 // virtual seconds on the bar
+    let rStart = 0, rEnd = 0;            // first and last real second in the range
     let playing = false;
-    let speed = 300;           // game seconds per real second
-    let showDeaths = true;
+    let speed = pref("speed", 30);
+    let show = pref("show", { D: true, A: true, W: true });
     let follow = false;
     let open = false;
+    let collapsed = false;
 
     const group = new THREE.Group();
     group.name = "heropath";
     app.mapViewer.markers.add(group);
-    const drawn = new Map();   // uuid -> {line, head, deaths: []}
+    const drawn = new Map();             // uuid -> {segs: [{m, state, key}], head, events: [m]}
+
+    // ── time ─────────────────────────────────────────────────
+    function tz() { return (index && index.tz) || undefined; }
+
+    /** Epoch seconds of local midnight of `date` in the server's time zone (old files had no t0). */
+    function tzMidnight(date) {
+        const guess = Date.parse(date + "T00:00:00Z") / 1000;
+        try {
+            const parts = new Intl.DateTimeFormat("en-US", {
+                timeZone: tz(), hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit",
+                hour: "2-digit", minute: "2-digit", second: "2-digit",
+            }).formatToParts(new Date(guess * 1000)).reduce((o, p) => (o[p.type] = p.value, o), {});
+            const wall = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second) / 1000;
+            return guess - (wall - guess);
+        } catch (e) { return guess; }
+    }
+
+    function fmt(sec, withDay) {
+        const opts = { timeZone: tz(), hour: "2-digit", minute: "2-digit" };
+        if (withDay) Object.assign(opts, { weekday: "short", day: "numeric", month: "short" });
+        try { return new Date(sec * 1000).toLocaleString(ES ? "es-ES" : LANG, opts); }
+        catch (e) { return new Date(sec * 1000).toLocaleString(); }
+    }
+
+    function duration(sec) {
+        const m = Math.round(sec / 60);
+        if (m < 60) return m + " min";
+        return Math.floor(m / 60) + " h " + String(m % 60).padStart(2, "0") + " min";
+    }
+
+    function distance(blocks) {
+        if (blocks < 1000) return Math.round(blocks) + " m";
+        return (blocks / 1000).toLocaleString(ES ? "es-ES" : LANG, { maximumFractionDigits: 1 }) + " km";
+    }
+
+    /** The time bar skips pauses: intervals of play, merged when closer than GAP_MERGE. */
+    function buildTimeline() {
+        const spans = [];
+        for (const p of players) {
+            if (!selected.has(p.uuid)) continue;
+            for (const s of p.segs) spans.push([s.start, s.end]);
+            for (const e of p.events) spans.push([e[0], e[0]]);
+        }
+        spans.sort((a, b) => a[0] - b[0]);
+        intervals = [];
+        let vAcc = 0;
+        for (const [a, b] of spans) {
+            const last = intervals[intervals.length - 1];
+            if (last && a - last[1] <= GAP_MERGE) {
+                if (b > last[1]) { vAcc += b - last[1]; last[1] = b; }
+            } else {
+                intervals.push([a, b, vAcc]);
+                vAcc += Math.max(1, b - a);
+            }
+        }
+        vMax = vAcc;
+        rStart = intervals.length ? intervals[0][0] : 0;
+        rEnd = intervals.length ? intervals[intervals.length - 1][1] : 0;
+    }
+
+    function realOf(vv) {
+        for (let i = intervals.length - 1; i >= 0; i--) {
+            const [a, b, va] = intervals[i];
+            if (vv >= va) return Math.min(b, a + (vv - va));
+        }
+        return rStart;
+    }
+
+    function virtualOf(real) {
+        let out = 0;
+        for (const [a, b, va] of intervals) {
+            if (real < a) break;
+            out = va + Math.min(real, b) - a;
+        }
+        return out;
+    }
 
     // ── data ─────────────────────────────────────────────────
     function getJson(path) {
@@ -92,174 +184,221 @@
         return getJson("index.json").then(j => { index = j; }).catch(() => { index = { days: [] }; });
     }
 
-    function loadDay() {
+    function datesInRange() {
+        const all = ((index && index.days) || []).map(d => d.date).sort().reverse();
+        if (!all.length) return [];
+        if (range === "day") return [day && all.includes(day) ? day : all[0]];
+        const newest = Date.parse(all[0] + "T12:00:00Z");
+        const days = range === "week" ? 7 : 30;
+        return all.filter(d => newest - Date.parse(d + "T12:00:00Z") < days * 86400000);
+    }
+
+    function loadRange() {
         clearDrawing();
-        doc = null;
+        players = [];
         mapId = currentMapId();
-        if (!day || !mapId) { body.innerHTML = ""; return Promise.resolve(); }
+        const dates = datesInRange();
+        if (!mapId || !dates.length) { buildBody(); return Promise.resolve(); }
         setStatus(T.loading);
-        return getJson("days/" + day + "/" + mapId + ".json")
-            .then(j => { doc = j; })
-            .catch(() => { doc = { players: [] }; })
-            .then(() => {
-                selected = new Set(doc.players.map(p => p.uuid));
-                tMin = Math.min(...doc.players.map(p => p.from), 86400);
-                tMax = Math.max(...doc.players.map(p => p.to), 0);
-                if (tMax < tMin) { tMin = 0; tMax = 0; }
-                t = tMax;
-                buildPanelBody();
+        return Promise.all(dates.map(d => getJson("days/" + d + "/" + mapId + ".json").catch(() => null)))
+            .then(docs => {
+                const byUuid = new Map();
+                docs.forEach((doc, i) => {
+                    if (!doc) return;
+                    const t0 = doc.t0 || tzMidnight(dates[i]);
+                    for (const p of doc.players) {
+                        let m = byUuid.get(p.uuid);
+                        if (!m) {
+                            m = { uuid: p.uuid, name: p.name, color: p.color, segs: [], events: [] };
+                            byUuid.set(p.uuid, m);
+                        }
+                        m.name = p.name;
+                        for (const seg of p.segments) {
+                            const pts = seg.map(q => [t0 + q[0], q[1], q[2], q[3]]);
+                            m.segs.push({ pts, start: pts[0][0], end: pts[pts.length - 1][0] });
+                        }
+                        for (const e of p.events) m.events.push([t0 + e[0], e[1], e[2], e[3], e[4], e[5] == null ? null : e[5]]);
+                    }
+                });
+                players = [...byUuid.values()];
+                for (const p of players) {
+                    p.segs.sort((a, b) => a.start - b.start);
+                    p.events.sort((a, b) => a[0] - b[0]);
+                    p.stats = stats(p);
+                }
+                players.sort((a, b) => b.stats.played - a.stats.played);
+                const keep = new Set(players.map(p => p.uuid));
+                selected = selected.size ? new Set([...selected].filter(u => keep.has(u))) : new Set(keep);
+                if (!selected.size) selected = new Set(keep);
+                if (focus && !keep.has(focus)) focus = null;
+                buildTimeline();
+                v = vMax;               // complete routes first; the bar replays them
+                buildBody();
                 redraw();
             });
+    }
+
+    function stats(p) {
+        let played = 0, walked = 0;
+        for (const s of p.segs) {
+            played += s.end - s.start;
+            for (let i = 1; i < s.pts.length; i++) {
+                const a = s.pts[i - 1], b = s.pts[i];
+                walked += Math.hypot(b[1] - a[1], b[3] - a[3]);
+            }
+        }
+        const count = k => p.events.filter(e => e[1] === k).length;
+        return { played, walked, deaths: count("D"), advs: count("A") };
     }
 
     // ── drawing ──────────────────────────────────────────────
     function clearDrawing() {
         for (const d of drawn.values()) {
-            group.remove(d.line); d.line.dispose && d.line.dispose();
+            d.segs.forEach(s => group.remove(s.m));
             group.remove(d.head);
-            d.deaths.forEach(m => group.remove(m));
-            (d.extra || []).forEach(m => group.remove(m));
+            d.events.forEach(m => group.remove(m));
         }
         drawn.clear();
     }
 
-    function rgb(hex) {
+    function rgba(hex, a) {
         const n = parseInt(hex.slice(1), 16);
-        return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a: 1 };
+        return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a };
     }
 
-    /** Position at time `at`, interpolated inside the segment that contains it. */
-    function positionAt(player, at) {
+    function lerp(a, b, at) {
+        const f = (at - a[0]) / Math.max(1, b[0] - a[0]);
+        return [at, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f, a[3] + (b[3] - a[3]) * f];
+    }
+
+    /** Where the player is at `at`: inside a segment, interpolated; between sessions, the last place seen. */
+    function positionAt(p, at) {
         let last = null;
-        for (const seg of player.segments) {
-            for (let i = 0; i < seg.length; i++) {
-                const p = seg[i];
-                if (p[0] > at) {
-                    if (i > 0 && last === seg[i - 1]) {
-                        const a = seg[i - 1], f = (at - a[0]) / Math.max(1, p[0] - a[0]);
-                        return [a[1] + (p[1] - a[1]) * f, a[2] + (p[2] - a[2]) * f, a[3] + (p[3] - a[3]) * f];
-                    }
-                    return last ? [last[1], last[2], last[3]] : null;
-                }
-                last = p;
+        for (const s of p.segs) {
+            if (s.start > at) break;
+            if (s.end <= at) { last = { pos: s.pts[s.pts.length - 1], online: s.end === at }; continue; }
+            for (let i = 1; i < s.pts.length; i++) {
+                if (s.pts[i][0] >= at) return { pos: lerp(s.pts[i - 1], s.pts[i], at), online: true };
             }
         }
-        return last ? [last[1], last[2], last[3]] : null;
+        return last;
     }
 
-    /**
-     * The route up to time `at`, as one polyline per segment. A segment never crosses a
-     * jump (teleport, portal, death), so no line is drawn across ground nobody walked.
-     */
-    function pieces(player, at) {
-        const out = [];
-        for (const seg of player.segments) {
-            if (seg[0][0] > at) break;
-            const part = [];
-            for (const p of seg) {
-                if (p[0] > at) {
-                    const pos = positionAt({ segments: [seg] }, at);
-                    if (pos) part.push({ x: pos[0], y: pos[1] + 0.5, z: pos[2] });
-                    break;
-                }
-                part.push({ x: p[1], y: p[2] + 0.5, z: p[3] });
-            }
-            if (part.length > 1) out.push(part);
+    function fade(seg) {
+        // Older routes are fainter, newest at full strength: the Zelda look over a week.
+        if (rEnd - rStart < 3600) return 1;
+        return 0.45 + 0.55 * Math.max(0, Math.min(1, (seg.end - rStart) / (rEnd - rStart)));
+    }
+
+    function iconHtml(p, e) {
+        const who = esc(p.name), when = fmt(e[0], range !== "day");
+        if (e[1] === "D") {
+            const why = e[5] ? esc(e[5]) : who + " " + T.died;
+            return `<div class="hp-ev hp-death" style="--hp:${p.color}" title="${why} · ${when}">✕</div>`;
         }
-        return out;
+        if (e[1] === "A") {
+            const [frame, name] = splitAdv(e[5]);
+            return `<div class="hp-ev hp-adv hp-${frame}" title="${who}: ${esc(name)} · ${when}">★</div>`;
+        }
+        return `<div class="hp-ev hp-dim" title="${who} ${T.from} ${esc(dimName(e[5]))} · ${when}">◎</div>`;
+    }
+
+    function splitAdv(detail) {
+        const s = String(detail || "task|?");
+        const i = s.indexOf("|");
+        const frame = i > 0 ? s.slice(0, i) : "task";
+        return [["task", "goal", "challenge"].includes(frame) ? frame : "task", i > 0 ? s.slice(i + 1) : s];
+    }
+
+    function dimName(d) {
+        return { overworld: T.overworld, nether: T.nether, end: T.end_dim }[d] || d || "?";
     }
 
     function redraw() {
-        if (!doc) return;
-        for (const player of doc.players) {
-            const on = open && selected.has(player.uuid) && player.from <= t;
-            let d = drawn.get(player.uuid);
-            if (!on) {
-                if (d) {
-                    d.line.visible = false; d.head.visible = false;
-                    d.deaths.forEach(m => m.visible = false);
-                    (d.extra || []).forEach(m => group.remove(m)); d.extra = [];
-                }
-                continue;
-            }
+        const t = realOf(v);
+        const ended = v >= vMax;
+        for (const p of players) {
+            const visible = open && selected.has(p.uuid) && (!focus || focus === p.uuid);
+            let d = drawn.get(p.uuid);
             if (!d) {
-                d = {
-                    line: new BM.LineMarker("heropath-line-" + player.uuid),
-                    head: new BM.HtmlMarker("heropath-head-" + player.uuid),
-                    deaths: [],
-                };
-                group.add(d.line);
+                if (!visible) continue;
+                d = { segs: [], head: new BM.HtmlMarker("hp-head-" + p.uuid), events: [] };
                 group.add(d.head);
-                for (const ev of player.events) {
-                    if (ev[1] !== "D") continue;
-                    const m = new BM.HtmlMarker("heropath-death-" + player.uuid + "-" + ev[0]);
+                for (const e of p.events) {
+                    if (!"DAW".includes(e[1])) continue;
+                    const m = new BM.HtmlMarker("hp-ev-" + p.uuid + "-" + e[0] + e[1]);
                     m.updateFromData({
-                        position: { x: ev[2], y: ev[3] + 1, z: ev[4] },
-                        anchor: { x: 9, y: 9 },
-                        classes: [],
-                        html: `<div class="hp-death" style="--hp:${player.color}" title="${esc(player.name)} ${T.died} ${clock(ev[0])}">✕</div>`,
+                        position: { x: e[2], y: e[3] + 1, z: e[4] }, anchor: { x: 10, y: 10 },
+                        classes: [], html: iconHtml(p, e),
                     });
-                    m.hpTime = ev[0];
-                    d.deaths.push(m);
+                    m.hpEvent = e;
+                    d.events.push(m);
                     group.add(m);
                 }
-                drawn.set(player.uuid, d);
+                drawn.set(p.uuid, d);
             }
-            const parts = pieces(player, t);
-            // A LineMarker is one polyline, so the first segment is `line` and the rest get
-            // markers of their own; a day usually has only a handful of segments.
-            d.extra = d.extra || [];
-            d.extra.forEach(m => group.remove(m));
-            d.extra = [];
-            if (parts.length) {
-                setLine(d.line, parts[0], player.color, player.name);
-                d.line.visible = true;
-                for (let i = 1; i < parts.length; i++) {
-                    const m = new BM.LineMarker("heropath-line-" + player.uuid + "-" + i);
-                    setLine(m, parts[i], player.color, player.name);
-                    group.add(m);
-                    d.extra.push(m);
+            p.segs.forEach((s, i) => {
+                let slot = d.segs[i];
+                if (!visible || s.start > t) { if (slot) slot.m.visible = false; return; }
+                if (!slot) { slot = { m: new BM.LineMarker("hp-line-" + p.uuid + "-" + i), key: "" }; group.add(slot.m); d.segs[i] = slot; }
+                const full = s.end <= t;
+                const alpha = fade(s);
+                const key = full ? "full" + alpha : "part" + t;
+                if (slot.key !== key) {
+                    let pts = s.pts;
+                    if (!full) {
+                        const k = pts.findIndex(q => q[0] > t);
+                        pts = pts.slice(0, k).concat([lerp(pts[k - 1], pts[k], t)]);
+                    }
+                    if (pts.length < 2) { slot.m.visible = false; return; }
+                    const line = pts.map(q => ({ x: q[1], y: q[2] + 0.5, z: q[3] }));
+                    slot.m.updateFromData({
+                        position: line[0], line, label: p.name, depthTest: false,
+                        lineWidth: full ? 4 : 6, lineColor: rgba(p.color, full ? alpha : 1),
+                    });
+                    slot.key = key;
                 }
-            } else {
-                d.line.visible = false;
-            }
-            const pos = positionAt(player, t);
-            if (pos) {
+                slot.m.visible = true;
+            });
+            const here = visible ? positionAt(p, t) : null;
+            if (here) {
+                const off = !here.online && !ended;
                 d.head.updateFromData({
-                    position: { x: pos[0], y: pos[1] + 1.5, z: pos[2] },
-                    anchor: { x: 0, y: 0 },
-                    classes: [],
-                    html: `<div class="hp-head" style="--hp:${player.color}"><span>${esc(player.name)}</span></div>`,
+                    position: { x: here.pos[1], y: here.pos[2] + 1.5, z: here.pos[3] }, anchor: { x: 0, y: 0 },
+                    classes: [], html: `<div class="hp-head${off ? " hp-off" : ""}" style="--hp:${p.color}"><span>${esc(p.name)}${off ? " · " + T.offline : ""}</span></div>`,
                 });
                 d.head.visible = true;
             } else {
                 d.head.visible = false;
             }
-            d.deaths.forEach(m => m.visible = showDeaths && m.hpTime <= t);
+            d.events.forEach(m => { m.visible = visible && show[m.hpEvent[1]] && m.hpEvent[0] <= t; });
         }
-        if (follow) followFirst();
-        updateClock();
+        if (follow) followPlayer(t);
+        updateClock(t);
     }
 
-    function setLine(marker, pts, color, name) {
-        marker.updateFromData({
-            position: pts[0],
-            line: pts,
-            label: name,
-            lineWidth: 3,
-            lineColor: rgb(color),
-            depthTest: false,
-        });
-    }
-
-    function followFirst() {
-        const p = doc && doc.players.find(p => selected.has(p.uuid) && p.from <= t);
-        if (!p) return;
-        const pos = positionAt(p, t);
-        if (!pos) return;
+    function moveCamera(x, z, extent) {
         const c = app.mapViewer.controlsManager;
-        c.position.x = pos[0];
-        c.position.z = pos[2];
+        c.position.x = x;
+        c.position.z = z;
+        if (extent !== undefined && typeof c.distance === "number") c.distance = Math.max(80, Math.min(4000, extent * 1.3));
+    }
+
+    function followPlayer(t) {
+        const p = players.find(q => selected.has(q.uuid) && (!focus || focus === q.uuid) && positionAt(q, t));
+        if (!p) return;
+        const here = positionAt(p, t);
+        moveCamera(here.pos[1], here.pos[3]);
+    }
+
+    function flyToPlayer(p) {
+        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+        for (const s of p.segs) for (const q of s.pts) {
+            minX = Math.min(minX, q[1]); maxX = Math.max(maxX, q[1]);
+            minZ = Math.min(minZ, q[3]); maxZ = Math.max(maxZ, q[3]);
+        }
+        if (minX === Infinity) return;
+        moveCamera((minX + maxX) / 2, (minZ + maxZ) / 2, Math.max(maxX - minX, maxZ - minZ));
     }
 
     // ── playback ─────────────────────────────────────────────
@@ -268,21 +407,29 @@
         if (!playing) return;
         const dt = lastFrame ? (now - lastFrame) / 1000 : 0;
         lastFrame = now;
-        t = Math.min(tMax, t + dt * speed);
-        if (slider) slider.value = String(t);
-        redraw();
-        if (t >= tMax) { setPlaying(false); return; }
+        setV(Math.min(vMax, v + dt * speed));
+        if (v >= vMax) { setPlaying(false); return; }
         requestAnimationFrame(tick);
     }
 
     function setPlaying(on) {
         playing = on;
-        if (playBtn) playBtn.textContent = on ? "❚❚ " + T.pause : "▶ " + T.play;
+        if (playBtn) {
+            playBtn.textContent = on ? "❚❚" : "▶";
+            playBtn.title = on ? T.pause : T.play;
+            playBtn.setAttribute("aria-label", playBtn.title);
+        }
         if (on) {
-            if (t >= tMax) t = tMin;
+            if (v >= vMax) setV(0);
             lastFrame = 0;
             requestAnimationFrame(tick);
         }
+    }
+
+    function setV(nv) {
+        v = Math.max(0, Math.min(vMax, nv));
+        if (slider) slider.value = String(v);
+        redraw();
     }
 
     // ── UI ───────────────────────────────────────────────────
@@ -292,18 +439,12 @@
         return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     }
 
-    function clock(sec) {
-        sec = Math.max(0, Math.round(sec));
-        const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
-        return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
-    }
-
     function setStatus(text) {
         if (statusEl) { statusEl.textContent = text || ""; statusEl.hidden = !text; }
     }
 
-    function updateClock() {
-        if (clockEl) clockEl.textContent = clock(t);
+    function updateClock(t) {
+        if (clockEl) clockEl.textContent = intervals.length ? fmt(t, range !== "day") : "";
     }
 
     function createButton() {
@@ -328,84 +469,194 @@
         panel.hidden = true;
         panel.setAttribute("aria-label", T.title);
         panel.innerHTML = `
-            <header><strong>${T.title}</strong><button type="button" class="hp-close" aria-label="close">×</button></header>
-            <label class="hp-row">${T.day} <select id="hp-day"></select></label>
-            <p class="hp-status" hidden></p>
-            <div class="hp-body"></div>`;
+            <header>
+              <strong>${T.title}</strong>
+              <span class="hp-actions">
+                <button type="button" class="hp-collapse" aria-expanded="true" title="${T.collapse}">–</button>
+                <button type="button" class="hp-close" title="${T.close}" aria-label="${T.close}">×</button>
+              </span>
+            </header>
+            <div class="hp-main">
+              <div class="hp-seg" role="group" aria-label="${T.range}">
+                <button type="button" data-range="day">${T.day}</button>
+                <button type="button" data-range="week">${T.week}</button>
+                <button type="button" data-range="month">${T.month}</button>
+              </div>
+              <select id="hp-day" aria-label="${T.day}"></select>
+              <p class="hp-status" hidden></p>
+              <div class="hp-body"></div>
+            </div>`;
         document.body.appendChild(panel);
         panel.querySelector(".hp-close").addEventListener("click", toggle);
+        const col = panel.querySelector(".hp-collapse");
+        col.addEventListener("click", () => {
+            collapsed = !collapsed;
+            panel.classList.toggle("hp-collapsed", collapsed);
+            col.textContent = collapsed ? "+" : "–";
+            col.title = collapsed ? T.expand : T.collapse;
+            col.setAttribute("aria-expanded", String(!collapsed));
+        });
         statusEl = panel.querySelector(".hp-status");
         body = panel.querySelector(".hp-body");
-        panel.querySelector("#hp-day").addEventListener("change", e => { day = e.target.value; setPlaying(false); loadDay(); });
+        panel.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => {
+            range = b.dataset.range;
+            savePref("range", range);
+            setPlaying(false);
+            syncRangeButtons();
+            loadRange();
+        }));
+        panel.querySelector("#hp-day").addEventListener("change", e => { day = e.target.value; setPlaying(false); loadRange(); });
+    }
+
+    function syncRangeButtons() {
+        panel.querySelectorAll("[data-range]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.range === range)));
+        panel.querySelector("#hp-day").hidden = range !== "day";
     }
 
     function fillDays() {
         const sel = panel.querySelector("#hp-day");
         sel.innerHTML = "";
         const days = (index && index.days) || [];
-        if (!days.length) { setStatus(T.noData); return; }
-        setStatus("");
         for (const d of days) {
             const o = document.createElement("option");
             o.value = d.date;
-            o.textContent = new Date(d.date + "T12:00:00").toLocaleDateString(ES ? "es-ES" : undefined,
+            o.textContent = new Date(d.date + "T12:00:00").toLocaleDateString(ES ? "es-ES" : LANG,
                 { weekday: "short", day: "numeric", month: "short" }) + " · " + d.players.length;
             sel.appendChild(o);
         }
-        if (!day || !days.some(d => d.date === day)) day = days[0].date;
-        sel.value = day;
+        if (days.length && (!day || !days.some(d => d.date === day))) day = days[0].date;
+        if (day) sel.value = day;
+        syncRangeButtons();
     }
 
-    function buildPanelBody() {
+    function buildBody() {
         body.innerHTML = "";
-        if (!doc || !doc.players.length) { setStatus(T.noMap); return; }
+        slider = playBtn = clockEl = null;
+        if (!index || !index.days.length) { setStatus(T.noData); return; }
+        if (!players.length) { setStatus(T.noMap); return; }
         setStatus("");
+
+        // players
         const list = document.createElement("div");
         list.className = "hp-players";
-        list.innerHTML = `<div class="hp-row hp-small">${T.players}
+        list.innerHTML = `<div class="hp-row hp-small"><span>${T.players}</span>
             <button type="button" data-all="1">${T.all}</button><button type="button" data-all="0">${T.none}</button></div>`;
-        for (const p of doc.players) {
-            const row = document.createElement("label");
-            row.className = "hp-player";
-            row.innerHTML = `<input type="checkbox" ${selected.has(p.uuid) ? "checked" : ""}>
-                <i style="background:${p.color}"></i><span>${esc(p.name)}</span><small>${clock(p.from)}–${clock(p.to)}</small>`;
+        for (const p of players) {
+            const row = document.createElement("div");
+            row.className = "hp-player" + (focus === p.uuid ? " hp-focused" : "") + (focus && focus !== p.uuid ? " hp-dimmed" : "");
+            const st = p.stats;
+            row.innerHTML = `
+                <input type="checkbox" ${selected.has(p.uuid) ? "checked" : ""} aria-label="${esc(p.name)}">
+                <button type="button" class="hp-name" title="${focus === p.uuid ? T.unfocus : T.focus}">
+                  <i style="background:${p.color}"></i><span>${esc(p.name)}</span></button>
+                <small>${duration(st.played)} ${T.played} · ${distance(st.walked)} ${T.walked}${st.deaths ? " · ✕ " + st.deaths : ""}${st.advs ? " · ★ " + st.advs : ""}</small>`;
             row.querySelector("input").addEventListener("change", e => {
                 if (e.target.checked) selected.add(p.uuid); else selected.delete(p.uuid);
+                const real = realOf(v), atEnd = v >= vMax;
+                buildTimeline();
+                v = atEnd ? vMax : virtualOf(real);
+                if (slider) { slider.max = String(vMax); slider.value = String(v); }
+                redraw();
+            });
+            row.querySelector(".hp-name").addEventListener("click", () => {
+                focus = focus === p.uuid ? null : p.uuid;
+                if (focus) { selected.add(p.uuid); flyToPlayer(p); }
+                buildBody();
                 redraw();
             });
             list.appendChild(row);
         }
         list.querySelectorAll("button[data-all]").forEach(b => b.addEventListener("click", () => {
-            selected = b.dataset.all === "1" ? new Set(doc.players.map(p => p.uuid)) : new Set();
-            buildPanelBody();
+            selected = b.dataset.all === "1" ? new Set(players.map(p => p.uuid)) : new Set();
+            focus = null;
+            buildTimeline();
+            v = vMax;
+            buildBody();
             redraw();
         }));
         body.appendChild(list);
 
+        // time
         const time = document.createElement("div");
         time.className = "hp-time";
         time.innerHTML = `
-            <div class="hp-row"><button type="button" class="hp-play"></button><output class="hp-clock"></output></div>
-            <input type="range" class="hp-slider" min="${tMin}" max="${tMax}" step="1" value="${t}" aria-label="time">
-            <div class="hp-row hp-small">
-              <label>${T.speed} <select class="hp-speed">
-                <option value="60">×60</option><option value="300">×300</option><option value="1200">×1200</option></select></label>
+            <div class="hp-row hp-transport">
+              <button type="button" class="hp-first" title="${T.start}" aria-label="${T.start}">⏮</button>
+              <button type="button" class="hp-play"></button>
+              <button type="button" class="hp-last" title="${T.end}">${T.end}</button>
+              <output class="hp-clock"></output>
             </div>
-            <label class="hp-row hp-small"><input type="checkbox" class="hp-deaths" ${showDeaths ? "checked" : ""}> ${T.deaths}</label>
-            <label class="hp-row hp-small"><input type="checkbox" class="hp-follow" ${follow ? "checked" : ""}> ${T.follow}</label>`;
+            <input type="range" class="hp-slider" min="0" max="${vMax}" step="1" value="${v}" aria-label="time">
+            <div class="hp-row hp-small">
+              <label title="${T.speedHint}">${T.speed} <select class="hp-speed">
+                ${SPEEDS.map(s => `<option value="${s}">×${s}</option>`).join("")}</select></label>
+              <label><input type="checkbox" class="hp-follow" ${follow ? "checked" : ""}> ${T.follow}</label>
+            </div>
+            <div class="hp-row hp-small hp-show"><span>${T.show}</span>
+              <label><input type="checkbox" data-show="D" ${show.D ? "checked" : ""}> <b class="hp-key hp-death">✕</b> ${T.deaths}</label>
+              <label><input type="checkbox" data-show="A" ${show.A ? "checked" : ""}> <b class="hp-key hp-adv hp-goal">★</b> ${T.advs}</label>
+              <label><input type="checkbox" data-show="W" ${show.W ? "checked" : ""}> <b class="hp-key hp-dim">◎</b> ${T.dims}</label>
+            </div>`;
         body.appendChild(time);
         slider = time.querySelector(".hp-slider");
         playBtn = time.querySelector(".hp-play");
         clockEl = time.querySelector(".hp-clock");
-        slider.addEventListener("input", () => { t = Number(slider.value); redraw(); });
+        slider.addEventListener("input", () => { setPlaying(false); setV(Number(slider.value)); });
         playBtn.addEventListener("click", () => setPlaying(!playing));
+        time.querySelector(".hp-first").addEventListener("click", () => { setPlaying(false); setV(0); });
+        time.querySelector(".hp-last").addEventListener("click", () => { setPlaying(false); setV(vMax); });
         const sp = time.querySelector(".hp-speed");
-        sp.value = String(speed);
-        sp.addEventListener("change", () => { speed = Number(sp.value); });
-        time.querySelector(".hp-deaths").addEventListener("change", e => { showDeaths = e.target.checked; redraw(); });
+        sp.value = String(SPEEDS.includes(speed) ? speed : 30);
+        sp.addEventListener("change", () => { speed = Number(sp.value); savePref("speed", speed); });
         time.querySelector(".hp-follow").addEventListener("change", e => { follow = e.target.checked; redraw(); });
+        time.querySelectorAll("[data-show]").forEach(c => c.addEventListener("change", () => {
+            show[c.dataset.show] = c.checked;
+            savePref("show", show);
+            buildMoments();
+            redraw();
+        }));
+
+        // moments
+        const moments = document.createElement("details");
+        moments.className = "hp-moments";
+        moments.open = pref("momentsOpen", true);
+        moments.addEventListener("toggle", () => savePref("momentsOpen", moments.open));
+        moments.innerHTML = `<summary>${T.moments}</summary><ol></ol>`;
+        body.appendChild(moments);
+        buildMoments();
         setPlaying(false);
-        updateClock();
+    }
+
+    function buildMoments() {
+        const ol = body.querySelector(".hp-moments ol");
+        if (!ol) return;
+        ol.innerHTML = "";
+        const items = [];
+        for (const p of players) {
+            if (!selected.has(p.uuid) || (focus && focus !== p.uuid)) continue;
+            for (const e of p.events) if (show[e[1]]) items.push([p, e]);
+        }
+        items.sort((a, b) => b[1][0] - a[1][0]);
+        const summary = body.querySelector(".hp-moments summary");
+        if (summary) summary.textContent = T.moments + " · " + items.length;
+        if (!items.length) { ol.innerHTML = `<li class="hp-small">${T.noMoments}</li>`; return; }
+        for (const [p, e] of items.slice(0, 150)) {
+            const li = document.createElement("li");
+            let text;
+            if (e[1] === "D") text = e[5] || p.name + " " + T.died;
+            else if (e[1] === "A") { const [frame, name] = splitAdv(e[5]); text = `${p.name}: ${T[frame]} «${name}»`; }
+            else text = `${p.name} ${T.from} ${dimName(e[5])}`;
+            const cls = e[1] === "D" ? "hp-death" : e[1] === "A" ? "hp-adv hp-" + splitAdv(e[5])[0] : "hp-dim";
+            const icon = e[1] === "D" ? "✕" : e[1] === "A" ? "★" : "◎";
+            li.innerHTML = `<button type="button"><b class="hp-key ${cls}" style="--hp:${p.color}">${icon}</b>
+                <span>${esc(text)}</span><small>${esc(fmt(e[0], range !== "day"))}</small></button>`;
+            li.querySelector("button").addEventListener("click", () => {
+                setPlaying(false);
+                setV(virtualOf(e[0]));
+                moveCamera(e[2], e[4], 120);
+            });
+            ol.appendChild(li);
+        }
     }
 
     function toggle() {
@@ -413,7 +664,7 @@
         button.classList.toggle("active", open);
         panel.hidden = !open;
         if (open) {
-            loadIndex().then(() => { fillDays(); return loadDay(); });
+            loadIndex().then(() => { fillDays(); return loadRange(); });
         } else {
             setPlaying(false);
             redraw();
@@ -423,7 +674,7 @@
     function watchMap() {
         setInterval(() => {
             const id = currentMapId();
-            if (open && id && id !== mapId) loadDay();
+            if (open && id && id !== mapId) loadRange();
         }, 700);
     }
 
@@ -431,7 +682,12 @@
         if (!createButton()) { setTimeout(start, 500); return; }
         createPanel();
         watchMap();
-        window.heropath = { version: 1, state: () => ({ day, mapId, t, open, players: doc ? doc.players.length : 0, drawn: drawn.size }) };
+        window.heropath = {
+            version: 2,
+            state: () => ({ range, day, mapId, open, players: players.length, drawn: drawn.size, v, vMax,
+                            t: realOf(v), intervals: intervals.length, selected: selected.size, focus }),
+            setV,
+        };
     }
 
     start();

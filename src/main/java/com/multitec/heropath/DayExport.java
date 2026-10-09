@@ -15,11 +15,12 @@ import java.util.function.Function;
  * {"date":"2026-10-03","map":"multitecworld","players":[
  *   {"uuid":"…","name":"yupipi93","color":"#33ccff","from":36000,"to":39600,
  *    "segments":[[[36000,10.5,64,-3],[36005,12,64,-3]], …],
- *    "events":[[37000,"D",11,60,-2], …]}]}
+ *    "events":[[37000,"D",11,60,-2,"ana was slain by Zombie"], …]}]}
  * </pre>
  *
- * Times are seconds since local midnight of {@code date}, which keeps the files small and
- * is what the time slider shows. A segment is a run of positions with nothing between
+ * Times are seconds since local midnight of {@code date}, which keeps the files small;
+ * {@code t0} is that midnight in epoch seconds, so the web map can join several days into
+ * one timeline without knowing about time zones. A segment is a run of positions with nothing between
  * them that was not walked: it starts at a join or a jump and ends at a quit.
  */
 public final class DayExport {
@@ -86,6 +87,7 @@ public final class DayExport {
                 for (String map : maps) {
                     StringBuilder doc = docs.computeIfAbsent(map, m -> new StringBuilder()
                             .append("{\"date\":").append(Json.str(date.toString()))
+                            .append(",\"t0\":").append(midnight / 1000)
                             .append(",\"map\":").append(Json.str(m))
                             .append(",\"players\":["));
                     if (firstPlayer.put(map, false) != null) doc.append(',');
@@ -135,7 +137,8 @@ public final class DayExport {
             evJson.append('[').append(secs(s.time(), midnight)).append(',')
                     .append(Json.str(String.valueOf(s.kind().code))).append(',')
                     .append(Json.num(s.x())).append(',').append(Json.num(s.y())).append(',')
-                    .append(Json.num(s.z())).append(']');
+                    .append(Json.num(s.z())).append(',')
+                    .append(s.detail() == null ? "null" : Json.str(s.detail())).append(']');
         }
         evJson.append(']');
 

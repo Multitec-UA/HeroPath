@@ -59,4 +59,13 @@ class RecorderTest {
         Sample death = new Sample(1_000, DEATH, "w", 0, 64, 0);
         assertSame(death, r.offer(death));
     }
+
+    @Test
+    void anAdvancementDoesNotMoveTheReferencePoint() {
+        Recorder r = new Recorder(2, 64, 60_000);
+        r.offer(p(0, "w", 0, 0));
+        Sample adv = new Sample(1_000, ADVANCEMENT, "w", 1, 64, 0, "task|Stone Age");
+        assertSame(adv, r.offer(adv));
+        assertNull(r.offer(p(2_000, "w", 1, 0)), "1 block from the last POSITION, not from the toast");
+    }
 }
