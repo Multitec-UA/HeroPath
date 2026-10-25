@@ -20,7 +20,7 @@ repositories {
 dependencies {
     // Pinned to the exact Paper build the server runs (PAPER_BUILD in MT-Minecraft's
     // compose). The server is pinned, so the plugin is compiled against the same API.
-    compileOnly 'io.papermc.paper:paper-api:26.2.build.115-stable'
+    compileOnly 'io.papermc.paper:paper-api:26.3.build.223-stable'
     // The API version BlueMap 5.23 serves; 2.7.x is what the chunk-trimmer addon already
     // runs against on this server.
     compileOnly 'de.bluecolored:bluemap-api:2.7.7'
