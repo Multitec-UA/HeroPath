@@ -49,7 +49,10 @@ webroot, and works wherever BlueMap's webapp is served from.
 
 ```bash
 # build (needs Docker; Paper 26.2's API requires Java 25, so the build runs in Gradle 9 / JDK 25)
-docker run --rm -u "$(id -u):$(id -g)" -e GRADLE_USER_HOME=/gradle -v gradle-cache:/gradle \
+# A host cache dir, not a named volume: Docker creates a missing volume owned by root and
+# Gradle (running as you) then fails with "Could not initialize native services".
+mkdir -p ~/.cache/qpc-gradle
+docker run --rm -u "$(id -u):$(id -g)" -e GRADLE_USER_HOME=/gradle -v ~/.cache/qpc-gradle:/gradle \
   -v "$PWD":/w -w /w gradle:9.1.0-jdk25 gradle --no-daemon -q build
 # -> build/libs/heropath-2.1.0.jar   (also runs the 20 unit tests)
 
